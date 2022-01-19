@@ -146,7 +146,7 @@ points(time(X),head(AG$Xhat,-1)-1.96*sqrt(head(AG$Sigma2hat,-1)),type="l",col="r
 This uses the gradient to optimize the parameters by gradient descent as described earlier. I've clipped the gradient for stability. I also have naively enforced the non-negativity constraint by simply setting negative coefficients in the GARCH process to a small positive number. Because the magnitudes of the coefficients are of differing magnitudes, I replace the constant $\eta_i$ with a vector $\vec\eta_i$ with an element for each parameter. In other words the learning rate is different for each parameter. I keep the parameter the same for each iteration, but one can considering decreasing the learning rate as the iteration increases similar to simulated annealing. The plots show the negative log-likelihood at each iteration, and  the last plot displays the actual time series, and the 95% confidence bands computed by the fitted ARMA(1,1)-GARCH(1,1) process.
 
 ```{r,warning=FALSE}
-n.its<-100
+n.its<-1000
 pars<-matrix(0,ncol=6,nrow=n.its+1)
 colnames(pars)<-c("mu","a","b","omega","alpha","beta")
 lls<-numeric(n.its+1)
