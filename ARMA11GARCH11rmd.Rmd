@@ -1,0 +1,177 @@
+---
+title: "Fitting an ARMA(1,1)-GARCH(1,1) process to financial time series"
+author: "Shon Czinner"
+date: "1/13/2022"
+output: html_document
+---
+
+<style type="text/css">
+body, td {
+   font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+  font-size: 16px
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## The ARMA(1,1)-GARCH(1,1) specification
+
+The specification of an ARMA(1,1)-GARCH(1,1) process for the returns $X_t$ is:
+$$ X_t=\mu+a\epsilon_{t-1}+bX_{t-1}+\epsilon_t$$
+$$\hat\sigma_t^2=\omega+\alpha\epsilon_{t-1}^2+\beta \hat\sigma_{t-1}^2$$
+where $\epsilon_t\sim WN(0,\sigma_t^2)$. So $\hat X_t=\mu+a\epsilon_{t-1}+bX_{t-1}$ and $\epsilon_t=X_t-\hat X_t$. Formally, for positive and second-order stationary solutions the constraints, $\omega,\alpha,\beta>0$ and $\alpha+\beta<1$. However we ignore this constraint here to no detriment as all the solutions we end up computing satisfy the constraints anyway.
+```{r}
+ARMA11GARCH11<-function(X,params){
+  mu<-params[1]
+  aa<-params[2]
+  bb<-params[3]
+  omega<-params[4]
+  alpha<-params[5]
+  beta<-params[6]
+  
+  Xhat<-numeric(length(X)+1)
+  Sigma2hat<-numeric(length(X)+1)
+  error<-numeric(length(X))
+  Xhat[1]<-0
+  Sigma2hat[1]<-var(X)#freebie
+  error[1]<-X[1]-Xhat[1]
+  
+  for(tt in 1:length(X)){
+    Xhat[tt+1]<-mu+aa*error[tt]+bb*X[tt]
+    Sigma2hat[tt+1]<-omega+alpha*(error[tt])^2+beta*Sigma2hat[tt]
+    if(tt!=length(X))
+    error[tt+1]<-Xhat[tt+1]-X[tt+1]
+  }
+  return(list(Xhat=Xhat,Sigma2hat=Sigma2hat,error=error))
+}
+```
+
+## The QMLE 
+
+The quasi-maximum (conditional) likelihood is simply the conditional likelihood assuming the returns are normally distributed (even though they may not be). This is justified by asymptotic convergence of QML estimates (QMLE). Maximizing this function with respect to the parameters of the model gives the most "likely" parameters. The conditional expectation of $X_t$ is $\hat X_t$ and the conditional variance of $X_t$ is $\sigma_t^2$. Therefore the conditional likelihood function with $\theta=(\mu,a,b,\omega,\alpha,\beta)^T$ is,
+$$L(\theta;X)=f(X;X,\theta)=\prod_{i=t}^T f(X_t;X_{-t},\theta)=\prod_{i=t}^T \frac{1}{\hat\sigma_t\sqrt{2\pi}}\exp{\left(-\frac{1}{2}\frac{(X_t-\hat X_t)^2}{\hat\sigma^2_t}\right)}$$
+This assumes that the returns are conditionally independent which is hopefully true after fitting the model. Taking the logarithm, which is simpler to maximize and a monotone transformation (and hence has the same maximum), gives
+$$\ell(\theta;X)=\sum_{t=1}^T\left(-\log(\hat\sigma_t)-\frac{1}{2}\log(2\pi)-\frac{1}{2}\frac{\epsilon_t^2}{\hat\sigma^2_t}\right)$$
+I put it in a slightly more convenient form, remove the term constant with respect to the the parameters, and multiply by -2 (and subsequently we minimize rather than maximize),
+$$\ell(\theta;X)=\sum_{t=1}^T\left(\log(\hat\sigma_t^2)+\frac{\epsilon_t^2}{\hat\sigma^2_t}\right)$$
+```{r}
+log.likelihood<-function(X,params){
+  X<-as.numeric(X)
+  AG<-ARMA11GARCH11(X,params)
+  ll<-sum(AG$error^2/head(AG$Sigma2hat,-1)+log(head(AG$Sigma2hat,-1)))
+  return(ll)
+}
+
+```
+
+
+## Optimizing by gradient descent
+
+This is simply a matter of differentiating $\ell(\theta;X)$ with respect to its parameters. Newton's method could be used if one finds the hessian/fisher information matrix. Computing the hessian is possible but I'll leave that for another analysis. The advantage of training by gradient descent is that it opens the door to online estimation with streaming data as it can be easily modified to stochastic gradient descent and other variants. With learning rate $\eta_i$ (subscript i, as in general it can change each iteration), gradient descent follows the update rule, 
+$$\theta_{i+1}=\theta_i+\eta_i\Delta\ell(\theta;X)$$
+$\Delta\ell(\theta;X)$ can be computed in several parts using the chain rule. First,
+$$\Delta\ell(\theta;X)=\sum_{t=1}^T\left(\frac{1}{\hat \sigma_t^2}\Delta\hat\sigma^2_t(\theta,X)+\frac{\hat\sigma_t^22\epsilon_t\Delta\epsilon_t(\theta;X)-\epsilon_t^2\Delta\hat\sigma^2_t(\theta,X)}{\hat\sigma^4_t}\right)$$
+$$\Delta_a \hat\sigma^2_t(\theta,X)=\alpha(2\epsilon_{t-1})\Delta_a\epsilon_{t-1}+\beta\Delta_a\hat\sigma_{t-1}^2$$
+$$\Delta_a \epsilon_t(\theta,X)=\epsilon_{t-1}+a\Delta_a\epsilon_{t-1}$$
+
+$$\Delta_\alpha \hat\sigma^2_t(\theta,X)=\epsilon_{t-1}^2+\beta\Delta_\alpha\hat\sigma_{t-1}^2$$
+$$\Delta_\alpha \epsilon_t(\theta,X)=0$$
+Partial derivatives with respect to the other parameters are somewhat similar to the cases of the two parameters above. 
+```{r}
+ll.gr<-function(X,params){
+  X<-as.numeric(X)
+  mu<-params[1]
+  aa<-params[2]
+  bb<-params[3]
+  omega<-params[4]
+  alpha<-params[5]
+  beta<-params[6]
+  
+  AG<-ARMA11GARCH11(X,params)
+  error<-AG$error
+  Sigma2hat<-AG$Sigma2hat
+  Xhat<-AG$Xhat
+  
+  derror<-matrix(data=0,nrow=length(error),ncol=6)
+  dSigma2hat<-matrix(data=0,nrow=length(error),ncol=6)
+  
+  for(tt in 1:(nrow(derror)-1)){
+    derror[tt+1,]<-c(1,error[tt],X[tt],0,0,0)+c(aa*derror[tt,1:3],0,0,0)
+    dSigma2hat[tt+1,]<-c(alpha*2*error[tt]*derror[tt,1:3],
+                         1,error[tt]^2,Sigma2hat[tt])+beta*dSigma2hat[tt,]
+  }
+  
+  gr<-apply((head(Sigma2hat,-1)*2*error*derror-error^2*dSigma2hat)/
+              (head(Sigma2hat,-1))^2+1/(head(Sigma2hat,-1))*dSigma2hat,2,sum)
+  
+  return(gr)
+}
+```
+
+## Loading the (log)return data
+```{r,message=FALSE}
+X<-diff(log(EuStockMarkets[,1]))
+```
+
+
+## Numerical Optimization
+
+This is just optimizing the log-likelihood using the built-in optimizing function in R. The plot displays the actual time series, and the 95% confidence bands computed by the fitted ARMA(1,1)-GARCH(1,1) process. Note that what is displayed is in-sample.
+
+```{r, warning= FALSE}
+init.par<-c(0,0,0,0.0001,0.05,0.90)
+names(init.par)<-c("mu","a","b","omega","alpha","beta")
+print(log.likelihood(X,init.par))
+opt<-optim(init.par,log.likelihood,X=X)
+opt.par<-opt$par
+print(opt$par)
+print(opt$value)
+AG<-ARMA11GARCH11(X,opt.par)
+plot(time(X),as.numeric(X),type="l",ylab="X",xlab="date")
+points(time(X),head(AG$Xhat,-1)+1.96*sqrt(head(AG$Sigma2hat,-1)),type="l",col="red")
+points(time(X),head(AG$Xhat,-1)-1.96*sqrt(head(AG$Sigma2hat,-1)),type="l",col="red")
+```
+
+## Gradient descent
+
+This uses the gradient to optimize the parameters by gradient descent as described earlier. I've clipped the gradient for stability. I also have naively enforced the non-negativity constraint by simply setting negative coefficients in the GARCH process to a small positive number. Because the magnitudes of the coefficients are of differing magnitudes, I replace the constant $\eta_i$ with a vector $\vec\eta_i$ with an element for each parameter. In other words the learning rate is different for each parameter. I keep the parameter the same for each iteration, but one can considering decreasing the learning rate as the iteration increases similar to simulated annealing. The plots show the negative log-likelihood at each iteration, and  the last plot displays the actual time series, and the 95% confidence bands computed by the fitted ARMA(1,1)-GARCH(1,1) process.
+
+```{r,warning=FALSE}
+n.its<-100
+pars<-matrix(0,ncol=6,nrow=n.its+1)
+colnames(pars)<-c("mu","a","b","omega","alpha","beta")
+lls<-numeric(n.its+1)
+pars[1,]<-init.par
+lls[1]<-log.likelihood(X,pars[1,])
+for(ii in 2:(n.its+1)){
+   gr<-ll.gr(X,pars[ii-1,])
+   gr<-pmax(-10^(5),pmin(gr,10^(5)))#clipping
+   eta=c(rep(10^(-10),3),10^(-11),rep(10^(-6),2))
+   pars[ii,]<-pars[ii-1,]-eta*gr
+   pars[ii,4:6]<-pmax(pars[ii,4:6],0.000000001)
+   lls[ii]<-log.likelihood(X,pars[ii,])
+}
+print(tail(pars,1))
+plot(lls,type="l")
+AG<-ARMA11GARCH11(X,tail(pars,1))
+plot(time(X),as.numeric(X),type="l",ylab="X",xlab="date")
+points(time(X),head(AG$Xhat,-1)+1.96*sqrt(head(AG$Sigma2hat,-1)),type="l",col="red")
+points(time(X),head(AG$Xhat,-1)-1.96*sqrt(head(AG$Sigma2hat,-1)),type="l",col="red")
+
+```
+
+## Other notes
+
+As mentioned earlier, I have ignored the constraints on the coefficients. These constraints can be implemented by projecting new parameter estimates onto the set of constrained solutions. One can also use adaptive learning rates, such as momentum strategies. Regularization penalties to changes in the parameter, or the magnitude of parameters can be added for slower changing parameter estimates. One can also consider simply clipping large values of the gradient. Specifications other than ARMA(1,1)-GARCH(1,1) can be considered in similar fashions. Reductions in the number of parameters increasing stability can be accomplished by utilizing variance targeting and mean targeting, where the parameters are constrained such that the implied long-run, unconditional mean and variance equal a specific target such as the historic mean and variance. One can also use stochastic gradient descent, and even only the single last observation for online estimation.
+
+After writing this I found a [similar article](https://www.almoststochastic.com/2013/07/static-parameter-estimation-for-garch.html) online for the case of a zero-mean GARCH(1,1) process. However that post appears to contain errors in the calculation of the gradient, ignoring the recursive elements, for example that a change in $\beta$ changes $\hat\sigma_{t-1}^2$ and not just $\hat\sigma_{t}^2$.
+
